@@ -42,4 +42,4 @@ Untuk perspektif dan informasi lebih lanjut mengenai Transpedia:
 
 **[Kunjungi Transpedia.id](https://transpedia.id/)**
 
-</div>
+<div class="glass">
