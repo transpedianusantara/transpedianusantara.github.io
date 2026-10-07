@@ -32,65 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: Fetch, generate and publish article
+      - name: Fetch, generate and publish
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          from datetime import datetime, timezone
-          from pathlib import Path
-          from urllib.parse import urljoin
-          from xml.etree import ElementTree as ET
-
-          import requests
-          from bs4 import BeautifulSoup
-
-          SITE = "https://transpedia.id/"
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (compatible; Transpedia-Nusantara-Autopost/1.0)"
-          }
-
-          def get(url, timeout=30):
-              response = requests.get(url, headers=HEADERS, timeout=timeout)
-              response.raise_for_status()
-              return response.text
-
-          def clean(text):
-              return re.sub(r"\s+", " ", text or "").strip()
-
-          def find_latest_from_feed():
-              for feed_url in (urljoin(SITE, "feed/"), urljoin(SITE, "rss/")):
-                  try:
-                      xml = get(feed_url, timeout=20)
-                      root = ET.fromstring(xml)
-                      items = root.findall(".//item")
-                      if not items:
-                          continue
-
-                      item = items[0]
-                      title = clean(item.findtext("title"))
-                      link = clean(item.findtext("link"))
-                      description = clean(item.findtext("description"))
-                      if title and link:
-                          return link, title, description
-                  except Exception as exc:
-                      print(f"Feed tidak tersedia ({feed_url}): {exc}")
-
-              return None
-
-          def find_latest_from_homepage():
-              html = get(SITE)
-              soup = BeautifulSoup(html, "html.parser")
-
-              month_pattern = (
-                  r"(January|February|March|April|May|June|July|August|"
-                  r"September|October|November|December)\s+\d{1,2},\s+\d{4}"
-              )
-
-              candidates = []
-
-              for a in soup.find_all("a", href=True):
+        run: python scripts/autopost.py
