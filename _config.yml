@@ -1,0 +1,11 @@
+title: Transpedia Nusantara
+description: Referensi digital tentang transformasi bisnis, digital marketing, branding, human capital, dan perkembangan industri.
+url: "https://transpedianusantara.github.io"
+
+markdown: kramdown
+theme: null
+
+permalink: /:categories/:title/
+
+plugins:
+  - jekyll-seo-tag
