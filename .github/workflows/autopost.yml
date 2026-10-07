@@ -32,8 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: Fetch latest Transpedia article
-        id: fetch
+      - name: Fetch, generate and publish article
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -41,151 +40,57 @@ jobs:
           import json
           import os
           import re
-          import sys
+          import subprocess
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urljoin
+          from xml.etree import ElementTree as ET
 
           import requests
           from bs4 import BeautifulSoup
 
           SITE = "https://transpedia.id/"
-          headers = {"User-Agent": "Transpedia-Nusantara-Autopost/1.0"}
-
-          def get(url):
-              r = requests.get(url, headers=headers, timeout=30)
-              r.raise_for_status()
-              return r.text
-
-          home_html = get(SITE)
-          home = BeautifulSoup(home_html, "html.parser")
-
-          # Transpedia currently exposes its latest Insight posts on the homepage.
-          # Skip navigation/category/author links and take the first substantial
-          # internal article link. The homepage is already ordered newest-first.
-          excluded = (
-              "/blog", "/category/", "/author/", "/tag/",
-              "/privacy", "/contact", "/about"
-          )
-          candidates = []
-
-          for a in home.find_all("a", href=True):
-              href = urljoin(SITE, a["href"]).split("#")[0]
-              title = " ".join(a.stripped_strings)
-              path = href.lower().replace(SITE.rstrip("/"), "", 1)
-
-              if not href.startswith(SITE):
-                  continue
-              if href.rstrip("/") == SITE.rstrip("/"):
-                  continue
-              if any(x in path for x in excluded):
-                  continue
-              if len(title) < 20:
-                  continue
-              if href not in [x[0] for x in candidates]:
-                  candidates.append((href, title))
-
-          article = candidates[0] if candidates else None
-
-          if article is None:
-              raise RuntimeError("Tidak menemukan artikel terbaru di Transpedia.id")
-
-          source_url, fallback_title = article
-          article_html = get(source_url)
-          page = BeautifulSoup(article_html, "html.parser")
-
-          h1 = page.find("h1")
-          source_title = h1.get_text(" ", strip=True) if h1 else fallback_title
-
-          # Pull the article content while excluding navigation/sidebar/footer.
-          article_node = page.find("article")
-          if article_node is None:
-              article_node = page.find("main")
-          if article_node is None:
-              article_node = page.body
-
-          for tag in article_node.find_all(["script", "style", "nav", "footer", "form"]):
-              tag.decompose()
-
-          source_text = article_node.get_text("\n", strip=True)
-          source_text = re.sub(r"\n{3,}", "\n\n", source_text)
-
-          # Keep the prompt bounded while retaining the complete article when practical.
-          source_text = source_text[:30000]
-
-          # Duplicate check by source URL.
-          marker = f"source_url: {source_url}"
-          posts_dir = Path("_posts")
-          if posts_dir.exists():
-              for p in posts_dir.glob("*.md"):
-                  try:
-                      if marker in p.read_text(encoding="utf-8"):
-                          print(f"SKIP_DUPLICATE={p}")
-                          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                              f.write("created=false\n")
-                              f.write(f"source_url={source_url}\n")
-                              f.write(f"source_title={source_title}\n")
-                          sys.exit(0)
-                  except UnicodeDecodeError:
-                      pass
-
-          prompt = f"""
-          Kamu adalah editor senior untuk Transpedia Nusantara.
-
-          Buat SATU artikel referensi baru berdasarkan artikel sumber berikut.
-          Jangan menyalin artikel sumber, jangan parafrase kalimat demi kalimat,
-          dan jangan membuat versi duplikat.
-
-          Tujuan:
-          - artikel harus berdiri sendiri dan memberi nilai tambah;
-          - gunakan sudut pandang analitis/praktis yang berbeda dari artikel sumber;
-          - bahasa Indonesia natural, profesional tetapi tidak kaku;
-          - jangan terdengar seperti template AI;
-          - hindari klaim statistik yang tidak ada sumbernya;
-          - jangan mengarang fakta baru;
-          - gunakan heading H2/H3 bila memang membantu;
-          - panjang sekitar 900-1300 kata;
-          - pembuka langsung ke persoalan;
-          - sertakan contoh atau implikasi praktis jika didukung sumber;
-          - di bagian akhir, beri konteks bahwa pembahasan ini terinspirasi dari
-            artikel sumber dan tautkan sumber secara natural;
-          - jangan menggunakan em dash.
-
-          Keluarkan JSON valid dengan field:
-          title
-          description
-          body
-
-          "body" harus Markdown dan TIDAK boleh berisi front matter.
-
-          Judul sumber:
-          {source_title}
-
-          URL sumber:
-          {source_url}
-
-          Isi sumber:
-          {source_text}
-          """
-
-          api_key = os.environ.get("OPENAI_API_KEY")
-          if not api_key:
-              raise RuntimeError("GitHub Secret OPENAI_API_KEY belum tersedia.")
-
-          payload = {
-              "model": "gpt-6-luna",
-              "input": prompt,
-              "max_output_tokens": 5000
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (compatible; Transpedia-Nusantara-Autopost/1.0)"
           }
 
-          r = requests.post(
-              "https://api.openai.com/v1/responses",
-              headers={
-                  "Authorization": f"Bearer {api_key}",
-                  "Content-Type": "application/json",
-              },
-              json=payload,
-              timeout=180,
-          )
-          r.raise_for_status()
-          data = r.json()
+          def get(url, timeout=30):
+              response = requests.get(url, headers=HEADERS, timeout=timeout)
+              response.raise_for_status()
+              return response.text
+
+          def clean(text):
+              return re.sub(r"\s+", " ", text or "").strip()
+
+          def find_latest_from_feed():
+              for feed_url in (urljoin(SITE, "feed/"), urljoin(SITE, "rss/")):
+                  try:
+                      xml = get(feed_url, timeout=20)
+                      root = ET.fromstring(xml)
+                      items = root.findall(".//item")
+                      if not items:
+                          continue
+
+                      item = items[0]
+                      title = clean(item.findtext("title"))
+                      link = clean(item.findtext("link"))
+                      description = clean(item.findtext("description"))
+                      if title and link:
+                          return link, title, description
+                  except Exception as exc:
+                      print(f"Feed tidak tersedia ({feed_url}): {exc}")
+
+              return None
+
+          def find_latest_from_homepage():
+              html = get(SITE)
+              soup = BeautifulSoup(html, "html.parser")
+
+              month_pattern = (
+                  r"(January|February|March|April|May|June|July|August|"
+                  r"September|October|November|December)\s+\d{1,2},\s+\d{4}"
+              )
+
+              candidates = []
+
+              for a in soup.find_all("a", href=True):
