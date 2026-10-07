@@ -1,7 +1,7 @@
 ---
 layout: default
 title: "Transpedia Nusantara"
-description: "Referensi digital tentang transformasi bisnis, digital marketing, branding, human capital, dan perkembangan industri."
+description: "Referensi digital tentang transformasi bisnis, digital marketing, branding, human capital, teknologi, dan perkembangan industri."
 ---
 
 <div class="glass">
@@ -19,8 +19,6 @@ Berbagai perspektif dan pembahasan mengenai perubahan bisnis dan perkembangan ek
 ### Digital Transformation
 
 Memahami bagaimana teknologi mengubah proses, model bisnis, pengalaman pelanggan, dan cara organisasi berkembang.
-
-[Read the article →](/digital-transformation/)
 
 ### Business Strategy
 
@@ -43,4 +41,5 @@ Transpedia Nusantara merupakan bagian dari ekosistem Transpedia yang membahas be
 Untuk perspektif dan informasi lebih lanjut mengenai Transpedia:
 
 **[Kunjungi Transpedia.id](https://transpedia.id/)**
+
 </div>
