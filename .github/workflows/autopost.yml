@@ -1,0 +1,271 @@
+name: Autopost from Transpedia
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autopost-transpedia
+  cancel-in-progress: false
+
+jobs:
+  autopost:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Fetch latest Transpedia article
+        id: fetch
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urljoin
+
+          import requests
+          from bs4 import BeautifulSoup
+
+          SITE = "https://transpedia.id/"
+          headers = {"User-Agent": "Transpedia-Nusantara-Autopost/1.0"}
+
+          def get(url):
+              r = requests.get(url, headers=headers, timeout=30)
+              r.raise_for_status()
+              return r.text
+
+          home_html = get(SITE)
+          home = BeautifulSoup(home_html, "html.parser")
+
+          # Transpedia currently exposes its latest Insight posts on the homepage.
+          # Skip navigation/category/author links and take the first substantial
+          # internal article link. The homepage is already ordered newest-first.
+          excluded = (
+              "/blog", "/category/", "/author/", "/tag/",
+              "/privacy", "/contact", "/about"
+          )
+          candidates = []
+
+          for a in home.find_all("a", href=True):
+              href = urljoin(SITE, a["href"]).split("#")[0]
+              title = " ".join(a.stripped_strings)
+              path = href.lower().replace(SITE.rstrip("/"), "", 1)
+
+              if not href.startswith(SITE):
+                  continue
+              if href.rstrip("/") == SITE.rstrip("/"):
+                  continue
+              if any(x in path for x in excluded):
+                  continue
+              if len(title) < 20:
+                  continue
+              if href not in [x[0] for x in candidates]:
+                  candidates.append((href, title))
+
+          article = candidates[0] if candidates else None
+
+          if article is None:
+              raise RuntimeError("Tidak menemukan artikel terbaru di Transpedia.id")
+
+          source_url, fallback_title = article
+          article_html = get(source_url)
+          page = BeautifulSoup(article_html, "html.parser")
+
+          h1 = page.find("h1")
+          source_title = h1.get_text(" ", strip=True) if h1 else fallback_title
+
+          # Pull the article content while excluding navigation/sidebar/footer.
+          article_node = page.find("article")
+          if article_node is None:
+              article_node = page.find("main")
+          if article_node is None:
+              article_node = page.body
+
+          for tag in article_node.find_all(["script", "style", "nav", "footer", "form"]):
+              tag.decompose()
+
+          source_text = article_node.get_text("\n", strip=True)
+          source_text = re.sub(r"\n{3,}", "\n\n", source_text)
+
+          # Keep the prompt bounded while retaining the complete article when practical.
+          source_text = source_text[:30000]
+
+          # Duplicate check by source URL.
+          marker = f"source_url: {source_url}"
+          posts_dir = Path("_posts")
+          if posts_dir.exists():
+              for p in posts_dir.glob("*.md"):
+                  try:
+                      if marker in p.read_text(encoding="utf-8"):
+                          print(f"SKIP_DUPLICATE={p}")
+                          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                              f.write("created=false\n")
+                              f.write(f"source_url={source_url}\n")
+                              f.write(f"source_title={source_title}\n")
+                          sys.exit(0)
+                  except UnicodeDecodeError:
+                      pass
+
+          prompt = f"""
+          Kamu adalah editor senior untuk Transpedia Nusantara.
+
+          Buat SATU artikel referensi baru berdasarkan artikel sumber berikut.
+          Jangan menyalin artikel sumber, jangan parafrase kalimat demi kalimat,
+          dan jangan membuat versi duplikat.
+
+          Tujuan:
+          - artikel harus berdiri sendiri dan memberi nilai tambah;
+          - gunakan sudut pandang analitis/praktis yang berbeda dari artikel sumber;
+          - bahasa Indonesia natural, profesional tetapi tidak kaku;
+          - jangan terdengar seperti template AI;
+          - hindari klaim statistik yang tidak ada sumbernya;
+          - jangan mengarang fakta baru;
+          - gunakan heading H2/H3 bila memang membantu;
+          - panjang sekitar 900-1300 kata;
+          - pembuka langsung ke persoalan;
+          - sertakan contoh atau implikasi praktis jika didukung sumber;
+          - di bagian akhir, beri konteks bahwa pembahasan ini terinspirasi dari
+            artikel sumber dan tautkan sumber secara natural;
+          - jangan menggunakan em dash.
+
+          Keluarkan JSON valid dengan field:
+          title
+          description
+          body
+
+          "body" harus Markdown dan TIDAK boleh berisi front matter.
+
+          Judul sumber:
+          {source_title}
+
+          URL sumber:
+          {source_url}
+
+          Isi sumber:
+          {source_text}
+          """
+
+          api_key = os.environ.get("OPENAI_API_KEY")
+          if not api_key:
+              raise RuntimeError("GitHub Secret OPENAI_API_KEY belum tersedia.")
+
+          payload = {
+              "model": "gpt-6-luna",
+              "input": prompt,
+              "max_output_tokens": 5000
+          }
+
+          r = requests.post(
+              "https://api.openai.com/v1/responses",
+              headers={
+                  "Authorization": f"Bearer {api_key}",
+                  "Content-Type": "application/json",
+              },
+              json=payload,
+              timeout=180,
+          )
+          r.raise_for_status()
+          data = r.json()
+
+          output_text = data.get("output_text")
+          if not output_text:
+              # Defensive fallback for Responses API output blocks.
+              chunks = []
+              for item in data.get("output", []):
+                  for c in item.get("content", []):
+                      if c.get("type") in ("output_text", "text") and c.get("text"):
+                          chunks.append(c["text"])
+              output_text = "".join(chunks)
+
+          if not output_text:
+              raise RuntimeError("Responses API tidak mengembalikan teks.")
+
+          output_text = output_text.strip()
+          if output_text.startswith("```"):
+              output_text = re.sub(r"^```(?:json)?\s*", "", output_text)
+              output_text = re.sub(r"\s*```$", "", output_text)
+
+          result = json.loads(output_text)
+          title = result["title"].strip()
+          description = result["description"].strip()
+          body = result["body"].strip()
+
+          if not title or not body:
+              raise RuntimeError("Output AI kosong atau tidak lengkap.")
+
+          slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+          date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+          filename = posts_dir / f"{date}-{slug}.md"
+          posts_dir.mkdir(parents=True, exist_ok=True)
+
+          # Avoid accidental filename collision.
+          n = 2
+          while filename.exists():
+              filename = posts_dir / f"{date}-{slug}-{n}.md"
+              n += 1
+
+          front_matter = f"""---
+layout: default
+title: "{title.replace('"', '\\"')}"
+description: "{description.replace('"', '\\"')}"
+date: {date}
+categories: [digital-marketing]
+source_url: {source_url}
+source_title: "{source_title.replace('"', '\\"')}"
+---
+
+"""
+
+          attribution = f"""
+
+---
+
+**Sumber referensi:** [{source_title}]({source_url})
+
+Artikel ini dikembangkan sebagai pembahasan mandiri berdasarkan topik dan konteks dari sumber tersebut.
+"""
+
+          filename.write_text(front_matter + body + attribution, encoding="utf-8")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("created=true\n")
+              f.write(f"source_url={source_url}\n")
+              f.write(f"source_title={source_title}\n")
+              f.write(f"post_file={filename}\n")
+
+          print(f"CREATED={filename}")
+          print(f"SOURCE={source_url}")
+          print(f"TITLE={source_title}")
+          PY
+
+      - name: Commit generated article
+        if: steps.fetch.outputs.created == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add _posts/
+          git commit -m "chore: autopost from Transpedia.id"
+          git push
